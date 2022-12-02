@@ -4,7 +4,11 @@ use futures_util::{
     future::{select, Either},
     stream, SinkExt, StreamExt,
 };
-use tokio::{fs, process::Command};
+use tokio::{
+    fs,
+    process::{Child, Command},
+    sync::Mutex,
+};
 use url::Url;
 use warp::{Filter, Rejection, Reply};
 
@@ -22,7 +26,15 @@ pub struct Context {
     pub remap: bool,
     /// Project root.
     pub cwd: Url,
+    /// Cached language servers
+    pub db: Db,
 }
+
+use std::collections::HashMap;
+use std::sync::Arc;
+
+// https://tokio.rs/tokio/tutorial/shared-state
+pub type Db = Arc<Mutex<HashMap<String, Child>>>;
 
 #[derive(Clone, Debug, serde::Deserialize)]
 struct Query {
@@ -82,31 +94,44 @@ async fn connected(
     ctx: Context,
     query: Option<Query>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let command = if let Some(query) = query {
-        if let Some(command) = ctx.commands.iter().find(|v| v[0] == query.name) {
-            command
-        } else {
-            // TODO Validate this earlier and reject, or close immediately.
-            tracing::warn!(
-                "Unknown Language Server '{}', falling back to the default",
-                query.name
-            );
-            &ctx.commands[0]
-        }
-    } else {
-        &ctx.commands[0]
-    };
-    tracing::info!("starting {} in {}", command[0], ctx.cwd);
-    let mut server = Command::new(&command[0])
-        .args(&command[1..])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()?;
-    tracing::debug!("running {}", command[0]);
+    let ls_name = query.unwrap().name;
+    let ls_name_2 = ls_name.clone();
 
-    let mut server_send = lsp::framed::writer(server.stdin.take().unwrap());
-    let mut server_recv = lsp::framed::reader(server.stdout.take().unwrap());
+    let maybe_command = ctx.commands.iter().find(|v| v[0] == ls_name);
+
+    if maybe_command.is_none() {
+        return Ok(());
+    }
+
+    let command = maybe_command.unwrap();
+
+    tracing::info!("trying to retrieve cached {} in {}", command[0], ctx.cwd);
+    let mut db = ctx.db.lock().await;
+    
+    let cached_server = db.get_mut(&ls_name);
+    
+    if cached_server.is_none() {
+        tracing::info!("creating new {} in {}", command[0], ctx.cwd);
+        let new_server = Command::new(&command[0])
+            .args(&command[1..])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .kill_on_drop(false)
+            .spawn()
+            .unwrap();
+
+        db.insert(ls_name, new_server);
+    }
+
+    let server = db.get_mut(&ls_name_2).unwrap();
+
+    let server_in = server.stdin.as_mut().unwrap();
+    let server_out = server.stdout.as_mut().unwrap();
+
+    tracing::debug!("running {}", command[0]);
+    let mut server_send = lsp::framed::writer(server_in);
+    let mut server_recv = lsp::framed::reader(server_out);
+
     let (mut client_send, client_recv) = ws.split();
     let client_recv = client_recv
         .filter_map(filter_map_warp_ws_message)
@@ -239,7 +264,6 @@ async fn connected(
             }
         }
     }
-
     Ok(())
 }
 
