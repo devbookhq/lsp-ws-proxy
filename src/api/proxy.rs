@@ -1,4 +1,4 @@
-use std::{collections::HashMap, convert::Infallible, process::Stdio, str::FromStr, sync::Arc};
+use std::{convert::Infallible, process::Stdio, str::FromStr, sync::Arc};
 
 use futures_util::{
     future::{select, Either},
@@ -7,8 +7,9 @@ use futures_util::{
 use tokio::{
     fs,
     process::{Child, Command},
-    sync::{Mutex, RwLock},
 };
+
+use dashmap::DashMap;
 use url::Url;
 use warp::{Filter, Rejection, Reply};
 
@@ -26,12 +27,20 @@ pub struct Context {
     pub remap: bool,
     /// Project root.
     pub cwd: Url,
-    /// Active cached language servers
-    pub active_ls: LanguageServers,
+    pub servers: Arc<DashMap<String, Child>>,
 }
 
-// https://tokio.rs/tokio/tutorial/shared-state
-pub type LanguageServers = Arc<RwLock<HashMap<String, Mutex<Child>>>>;
+// impl Context {
+//     pub fn get_server(&self, command: String) -> MappedMutexGuard<Option<&mut Child>> {
+//         MutexGuard::map(self.servers.lock(), |d| {
+//             let v = d.get_mut(&command);
+//             return &mut v;
+//         })
+//     }
+//     // pub fn set_active_ls(&self, command: String, ls: Child) -> MappedMutexGuard<Child> {
+//     //     MutexGuard::map(self.active_ls.lock().get_mut(k), |d| d.insert(command, ls))
+//     // }
+// }
 
 #[derive(Clone, Debug, serde::Deserialize)]
 struct Query {
@@ -92,7 +101,6 @@ async fn connected(
     query: Option<Query>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let ls_name = query.unwrap().name;
-    let ls_name_clone = ls_name.clone();
 
     let maybe_command = ctx.commands.iter().find(|v| v[0] == ls_name);
 
@@ -103,12 +111,7 @@ async fn connected(
     let command = maybe_command.unwrap();
 
     tracing::info!("trying to retrieve cached {} in {}", command[0], ctx.cwd);
-    let active_ls_read = ctx.active_ls.read().await;
-
-    let active_server = active_ls_read.get(&ls_name);
-
-    if active_server.is_none() {
-        drop(active_ls_read);
+    if ctx.servers.get(&ls_name.clone()).is_none() {
         tracing::info!("creating new {} in {}", command[0], ctx.cwd);
         let new_server = Command::new(&command[0])
             .args(&command[1..])
@@ -118,25 +121,18 @@ async fn connected(
             .spawn()
             .unwrap();
 
-        let mut active_ls_write = ctx.active_ls.write().await;
-        active_ls_write.insert(ls_name, Mutex::new(new_server));
-        drop(active_ls_write);
-    } else {
-        drop(active_ls_read);
+        ctx.servers.insert(ls_name.clone(), new_server);
     }
 
-    let map = ctx.active_ls.read().await;
-    let maybe_server = map.get(&ls_name_clone);
-    drop(map);
+    let mut maybe_server = ctx.servers.get_mut(&ls_name.clone());
 
     if maybe_server.is_none() {
         return Ok(());
     }
 
-    let mut server = &maybe_server.unwrap().into_inner();
-
-    let server_in = server.stdin.as_mut().unwrap();
-    let server_out = server.stdout.as_mut().unwrap();
+    let server_ref = maybe_server.as_deref_mut().unwrap();
+    let server_in = server_ref.stdin.as_mut().unwrap();
+    let server_out = server_ref.stdout.as_mut().unwrap();
 
     tracing::debug!("running {}", command[0]);
     let mut server_send = lsp::framed::writer(server_in);
