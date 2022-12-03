@@ -1,4 +1,4 @@
-use std::{convert::Infallible, process::Stdio, str::FromStr};
+use std::{collections::HashMap, convert::Infallible, process::Stdio, str::FromStr, sync::Arc};
 
 use futures_util::{
     future::{select, Either},
@@ -7,7 +7,7 @@ use futures_util::{
 use tokio::{
     fs,
     process::{Child, Command},
-    sync::Mutex,
+    sync::{Mutex, RwLock},
 };
 use url::Url;
 use warp::{Filter, Rejection, Reply};
@@ -26,15 +26,12 @@ pub struct Context {
     pub remap: bool,
     /// Project root.
     pub cwd: Url,
-    /// Cached language servers
-    pub db: Db,
+    /// Active cached language servers
+    pub active_ls: LanguageServers,
 }
 
-use std::collections::HashMap;
-use std::sync::Arc;
-
 // https://tokio.rs/tokio/tutorial/shared-state
-pub type Db = Arc<Mutex<HashMap<String, Child>>>;
+pub type LanguageServers = Arc<RwLock<HashMap<String, Mutex<Child>>>>;
 
 #[derive(Clone, Debug, serde::Deserialize)]
 struct Query {
@@ -95,7 +92,7 @@ async fn connected(
     query: Option<Query>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let ls_name = query.unwrap().name;
-    let ls_name_2 = ls_name.clone();
+    let ls_name_clone = ls_name.clone();
 
     let maybe_command = ctx.commands.iter().find(|v| v[0] == ls_name);
 
@@ -106,11 +103,12 @@ async fn connected(
     let command = maybe_command.unwrap();
 
     tracing::info!("trying to retrieve cached {} in {}", command[0], ctx.cwd);
-    let mut db = ctx.db.lock().await;
-    
-    let cached_server = db.get_mut(&ls_name);
-    
-    if cached_server.is_none() {
+    let active_ls_read = ctx.active_ls.read().await;
+
+    let active_server = active_ls_read.get(&ls_name);
+
+    if active_server.is_none() {
+        drop(active_ls_read);
         tracing::info!("creating new {} in {}", command[0], ctx.cwd);
         let new_server = Command::new(&command[0])
             .args(&command[1..])
@@ -120,10 +118,22 @@ async fn connected(
             .spawn()
             .unwrap();
 
-        db.insert(ls_name, new_server);
+        let mut active_ls_write = ctx.active_ls.write().await;
+        active_ls_write.insert(ls_name, Mutex::new(new_server));
+        drop(active_ls_write);
+    } else {
+        drop(active_ls_read);
     }
 
-    let server = db.get_mut(&ls_name_2).unwrap();
+    let map = ctx.active_ls.read().await;
+    let maybe_server = map.get(&ls_name_clone);
+    drop(map);
+
+    if maybe_server.is_none() {
+        return Ok(());
+    }
+
+    let mut server = &maybe_server.unwrap().into_inner();
 
     let server_in = server.stdin.as_mut().unwrap();
     let server_out = server.stdout.as_mut().unwrap();

@@ -2,9 +2,9 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use crate::api::proxy::Db;
+use crate::api::proxy::LanguageServers;
 use argh::FromArgs;
-use tokio::sync::Mutex;
+use tokio::sync::RwLock;
 use url::Url;
 use warp::{http, Filter};
 
@@ -62,7 +62,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let (opts, commands) = get_opts_and_commands();
 
-    let db: Db = Arc::new(Mutex::new(HashMap::new()));
+    let active_ls: LanguageServers = Arc::new(RwLock::new(HashMap::new()));
 
     let cwd = std::env::current_dir()?;
     // TODO Move these to `api` module.
@@ -76,7 +76,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         commands,
         sync: opts.sync,
         remap: opts.remap,
-        db,
+        active_ls,
         cwd: Url::from_directory_path(&cwd).expect("valid url from current dir"),
     });
     let healthz = warp::path::end().and(warp::get()).map(|| "OK");
