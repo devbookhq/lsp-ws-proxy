@@ -4,6 +4,10 @@
 
 tasks:
   - init: cargo build
-    command: cargo watch -x run
 
+github:
+  prebuilds:
+    branches: true
 
+image:
+  file: .gitpod.Dockerfile
