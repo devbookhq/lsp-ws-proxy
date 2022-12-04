@@ -42,12 +42,6 @@ struct Options {
         from_str_fn(parse_listen)
     )]
     listen: String,
-    /// write text document to disk on save, and enable `/files` endpoint
-    #[argh(switch, short = 's')]
-    sync: bool,
-    /// remap relative uri (source://)
-    #[argh(switch, short = 'r')]
-    remap: bool,
     /// show version and exit
     #[argh(switch, short = 'v')]
     version: bool,
@@ -60,7 +54,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     let (opts, commands) = get_opts_and_commands();
-
     let servers = Arc::new(DashMap::<String, Child>::new());
 
     let cwd = std::env::current_dir()?;
@@ -73,27 +66,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // TODO? Keep track of added files and remove them on disconnect?
     let proxy = api::proxy::handler(api::proxy::Context {
         commands,
-        sync: opts.sync,
-        remap: opts.remap,
         servers,
         cwd: Url::from_directory_path(&cwd).expect("valid url from current dir"),
     });
     let healthz = warp::path::end().and(warp::get()).map(|| "OK");
     let addr = opts.listen.parse::<SocketAddr>().expect("valid addr");
-    // Enable `/files` endpoint if sync
-    if opts.sync {
-        let files = api::files::handler(api::files::Context {
-            cwd,
-            remap: opts.remap,
-        });
-        warp::serve(proxy.or(healthz).or(files).recover(api::recover).with(cors))
-            .run(addr)
-            .await;
-    } else {
-        warp::serve(proxy.or(healthz).recover(api::recover).with(cors))
-            .run(addr)
-            .await;
-    }
+
+    warp::serve(proxy.or(healthz).recover(api::recover).with(cors))
+        .run(addr)
+        .await;
     Ok(())
 }
 

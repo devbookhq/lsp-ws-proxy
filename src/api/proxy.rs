@@ -4,10 +4,7 @@ use futures_util::{
     future::{select, Either},
     stream, SinkExt, StreamExt,
 };
-use tokio::{
-    fs,
-    process::{Child, Command},
-};
+use tokio::process::{Child, Command};
 
 use dashmap::DashMap;
 use url::Url;
@@ -21,26 +18,11 @@ use super::with_context;
 pub struct Context {
     /// One or more commands to start a Language Server.
     pub commands: Vec<Vec<String>>,
-    /// Write file on save.
-    pub sync: bool,
-    /// Remap relative `source://` to absolute `file://`.
-    pub remap: bool,
     /// Project root.
     pub cwd: Url,
+    /// Cached language servers.
     pub servers: Arc<DashMap<String, Child>>,
 }
-
-// impl Context {
-//     pub fn get_server(&self, command: String) -> MappedMutexGuard<Option<&mut Child>> {
-//         MutexGuard::map(self.servers.lock(), |d| {
-//             let v = d.get_mut(&command);
-//             return &mut v;
-//         })
-//     }
-//     // pub fn set_active_ls(&self, command: String, ls: Child) -> MappedMutexGuard<Child> {
-//     //     MutexGuard::map(self.active_ls.lock().get_mut(k), |d| d.insert(command, ls))
-//     // }
-// }
 
 #[derive(Clone, Debug, serde::Deserialize)]
 struct Query {
@@ -67,25 +49,6 @@ pub fn handler(ctx: Context) -> impl Filter<Extract = impl Reply, Error = Reject
         })
 }
 
-#[tracing::instrument(level = "debug", err, skip(msg))]
-async fn maybe_write_text_document(msg: &lsp::Message) -> Result<(), std::io::Error> {
-    if let lsp::Message::Notification(lsp::Notification::DidSave { params }) = msg {
-        if let Some(text) = &params.text {
-            let uri = &params.text_document.uri;
-            if uri.scheme() == "file" {
-                if let Ok(path) = uri.to_file_path() {
-                    if let Some(parent) = path.parent() {
-                        tracing::debug!("writing to {:?}", path);
-                        fs::create_dir_all(parent).await?;
-                        fs::write(&path, text.as_bytes()).await?;
-                    }
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
 async fn on_upgrade(socket: warp::ws::WebSocket, ctx: Context, query: Option<Query>) {
     tracing::info!("connected");
     if let Err(err) = connected(socket, ctx, query).await {
@@ -94,7 +57,7 @@ async fn on_upgrade(socket: warp::ws::WebSocket, ctx: Context, query: Option<Que
     tracing::info!("disconnected");
 }
 
-#[tracing::instrument(level = "debug", skip(ws, ctx), fields(remap = %ctx.remap, sync = %ctx.sync))]
+#[tracing::instrument(level = "debug", skip(ws, ctx))]
 async fn connected(
     ws: warp::ws::WebSocket,
     ctx: Context,
@@ -164,14 +127,7 @@ async fn connected(
             Either::Left((from_client, p_server_msg)) => {
                 match from_client {
                     // Valid LSP message
-                    Some(Ok(Message::Message(mut msg))) => {
-                        if ctx.remap {
-                            lsp::ext::remap_relative_uri(&mut msg, &ctx.cwd)?;
-                            tracing::debug!("remapped relative URI from client");
-                        }
-                        if ctx.sync {
-                            maybe_write_text_document(&msg).await?;
-                        }
+                    Some(Ok(Message::Message(msg))) => {
                         let text = serde_json::to_string(&msg)?;
                         tracing::debug!("-> {}", text);
                         server_send.send(text).await?;
@@ -235,21 +191,8 @@ async fn connected(
                 match from_server {
                     // Serialized LSP Message
                     Some(Ok(text)) => {
-                        if ctx.remap {
-                            if let Ok(mut msg) = lsp::Message::from_str(&text) {
-                                lsp::ext::remap_relative_uri(&mut msg, &ctx.cwd)?;
-                                tracing::debug!("remapped relative URI from server");
-                                let text = serde_json::to_string(&msg)?;
-                                tracing::debug!("<- {}", text);
-                                client_send.send(warp::ws::Message::text(text)).await?;
-                            } else {
-                                tracing::warn!("<- {}", text);
-                                client_send.send(warp::ws::Message::text(text)).await?;
-                            }
-                        } else {
-                            tracing::debug!("<- {}", text);
-                            client_send.send(warp::ws::Message::text(text)).await?;
-                        }
+                        tracing::debug!("<- {}", text);
+                        client_send.send(warp::ws::Message::text(text)).await?;
                     }
 
                     // Codec Error
