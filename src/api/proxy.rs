@@ -1,27 +1,29 @@
-use std::{convert::Infallible, process::Stdio, str::FromStr, sync::Arc};
+use std::{
+    borrow::BorrowMut, convert::Infallible, ops::DerefMut, process::Stdio, str::FromStr, sync::Arc,
+};
 
 use futures_util::{
     future::{select, Either},
     stream, SinkExt, StreamExt,
 };
+
 use tokio::process::{Child, Command};
 
-use dashmap::DashMap;
 use url::Url;
 use warp::{Filter, Rejection, Reply};
 
 use crate::lsp;
 
-use super::with_context;
+use super::{arc::ArcMap, with_context};
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Context {
     /// One or more commands to start a Language Server.
     pub commands: Vec<Vec<String>>,
     /// Project root.
     pub cwd: Url,
     /// Cached language servers.
-    pub servers: Arc<DashMap<String, Child>>,
+    pub servers: Arc<ArcMap<String, Child>>,
 }
 
 #[derive(Clone, Debug, serde::Deserialize)]
@@ -73,9 +75,19 @@ async fn connected(
 
     let command = maybe_command.unwrap();
 
-    tracing::info!("trying to retrieve cached {} in {}", command[0], ctx.cwd);
-    if ctx.servers.get(&ls_name.clone()).is_none() {
-        tracing::info!("creating new {} in {}", command[0], ctx.cwd);
+    tracing::info!(
+        "trying to retrieve cached server {} in {}",
+        command[0],
+        ctx.cwd
+    );
+
+    let ls_name_cached = ls_name.clone();
+    let cached_server_guard = ctx.servers.get(ls_name_cached);
+
+    let not_cached = cached_server_guard.is_err();
+    drop(cached_server_guard);
+
+    if not_cached {
         let new_server = Command::new(&command[0])
             .args(&command[1..])
             .stdin(Stdio::piped())
@@ -87,15 +99,13 @@ async fn connected(
         ctx.servers.insert(ls_name.clone(), new_server);
     }
 
-    let mut maybe_server = ctx.servers.get_mut(&ls_name.clone());
+    let active_server_guard = ctx.servers.get(ls_name);
+    let active_server_res = active_server_guard.unwrap();
+    let mut active_server = active_server_res.lock().await;
+    let server = active_server.deref_mut();
 
-    if maybe_server.is_none() {
-        return Ok(());
-    }
-
-    let server_ref = maybe_server.as_deref_mut().unwrap();
-    let server_in = server_ref.stdin.as_mut().unwrap();
-    let server_out = server_ref.stdout.as_mut().unwrap();
+    let server_in = server.stdin.as_mut().unwrap();
+    let server_out = server.stdout.as_mut().unwrap();
 
     tracing::debug!("running {}", command[0]);
     let mut server_send = lsp::framed::writer(server_in);

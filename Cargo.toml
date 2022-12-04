@@ -28,7 +28,6 @@ warp = { git = "https://github.com/kazk/warp", branch = "permessage-deflate", de
 tracing = "0.1.26"
 tracing-subscriber = "0.2.18"
 thiserror = "1.0.26"
-dashmap = "5.4.0"
 
 [dev-dependencies]
 

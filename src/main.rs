@@ -1,9 +1,9 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::process::Child;
 
+use api::arc::ArcMap;
 use argh::FromArgs;
-use dashmap::DashMap;
+use tokio::process::Child;
 use url::Url;
 use warp::{http, Filter};
 
@@ -54,7 +54,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     let (opts, commands) = get_opts_and_commands();
-    let servers = Arc::new(DashMap::<String, Child>::new());
+    let servers = Arc::new(ArcMap::new());
 
     let cwd = std::env::current_dir()?;
     // TODO Move these to `api` module.
