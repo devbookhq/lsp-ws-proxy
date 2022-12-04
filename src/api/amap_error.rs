@@ -2,13 +2,11 @@
 
 use std::convert::From;
 use std::sync::mpsc::{RecvError, SendError};
-use tokio::sync::MutexGuard;
 
 #[derive(Debug)]
 pub enum AMapErr {
     SendErr,
     RecvErr,
-    PoisonErr,
     NotFound,
 }
 

@@ -3,7 +3,6 @@ use std::sync::Arc;
 
 use api::arc::ArcMap;
 use argh::FromArgs;
-use tokio::process::Child;
 use url::Url;
 use warp::{http, Filter};
 

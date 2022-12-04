@@ -23,7 +23,13 @@ pub struct Context {
     /// Project root.
     pub cwd: Url,
     /// Cached language servers.
-    pub servers: Arc<ArcMap<String, Child>>,
+    pub servers: Arc<ArcMap<String, LanguageServer>>,
+}
+
+#[derive(Debug)]
+pub struct LanguageServer {
+    initialized_response: Option<String>,
+    process: Child,
 }
 
 #[derive(Clone, Debug, serde::Deserialize)]
@@ -88,7 +94,7 @@ async fn connected(
     drop(cached_server_guard);
 
     if not_cached {
-        let new_server = Command::new(&command[0])
+        let process = Command::new(&command[0])
             .args(&command[1..])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -96,13 +102,21 @@ async fn connected(
             .spawn()
             .unwrap();
 
-        ctx.servers.insert(ls_name.clone(), new_server);
+        ctx.servers
+            .insert(
+                ls_name.clone(),
+                LanguageServer {
+                    process,
+                    initialized_response: None,
+                },
+            )
+            .expect("Cannot cache new language server");
     }
 
     let active_server_guard = ctx.servers.get(ls_name);
     let active_server_res = active_server_guard.unwrap();
     let mut active_server = active_server_res.lock().await;
-    let server = active_server.deref_mut();
+    let server = active_server.process.borrow_mut();
 
     let server_in = server.stdin.as_mut().unwrap();
     let server_out = server.stdout.as_mut().unwrap();
